@@ -1,4 +1,12 @@
 # Exynos FMP makefile
+ifdef CONFIG_SOC_S5E9925
+  TARGET_SOC := s5e9925
+endif
+
+ifdef CONFIG_SOC_S5E8825
+  TARGET_SOC := s5e8825
+endif
+
 ccflags-y += -I$(srctree)/drivers/scsi/ufs/$(TARGET_SOC)
 
 ifeq ($(CONFIG_EXYNOS_FMP_INTEGRITY_TEST), y)
@@ -53,5 +61,5 @@ fips_clean:
 	@rm -f $(objtree)/drivers/crypto/fmp/fipsed_*.c
 	@rm -f $(objtree)/drivers/crypto/fmp/fips140_ic_support.c
 	@rm -f $(objtree)/drivers/crypto/fmp/*.o
-	@sync
+	#@sync
 	@echo " Clean FIPS module artefacts completed "
