@@ -69,34 +69,6 @@ static int proximity_get_calibration_data(void)
 	return 0;
 }
 
-static int proximity_get_setting_mode(void)
-{
-	int ret = 0;
-	char *buffer = NULL;
-	int buffer_length = 0;
-	struct proximity_data *data = (struct proximity_data *)get_sensor(SENSOR_TYPE_PROXIMITY)->data;
-
-	ret = shub_send_command_wait(CMD_GETVALUE, SENSOR_TYPE_PROXIMITY, PROXIMITY_SETTING_MODE, 1000, NULL,
-					0, &buffer, &buffer_length, true);
-	if (ret < 0) {
-		shub_errf("shub_send_command_wait fail %d", ret);
-		return ret;
-	}
-
-	if (buffer_length != sizeof(data->setting_mode)) {
-		shub_errf("buffer length error(%d)", buffer_length);
-		kfree(buffer);
-		return -EINVAL;
-	}
-
-	memcpy(&data->setting_mode, buffer, sizeof(data->setting_mode));
-	save_proximity_setting_mode();
-
-	kfree(buffer);
-
-	return 0;
-}
-
 static ssize_t proximity_cal_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t size)
 {
 	int ret = 0;
@@ -104,7 +76,7 @@ static ssize_t proximity_cal_store(struct device *dev, struct device_attribute *
 
 	save_panel_lcd_type();
 
-	ret = shub_send_command(CMD_SETVALUE, SENSOR_TYPE_PROXIMITY, PROX_CMD_CALIBRATION_START, NULL, 0);
+	ret = shub_send_command(CMD_SETVALUE, SENSOR_TYPE_PROXIMITY, PROX_SUBCMD_CALIBRATION_START, NULL, 0);
 	if (ret < 0) {
 		shub_errf("shub_send_command_wait fail %d", ret);
 		return ret;
@@ -112,7 +84,6 @@ static ssize_t proximity_cal_store(struct device *dev, struct device_attribute *
 
 	msleep(500);
 
-	proximity_get_setting_mode();
 	proximity_get_calibration_data();
 
 	shub_infof("ADC : %u, mode : %u", *((u16 *)(data->cal_data)), data->setting_mode);

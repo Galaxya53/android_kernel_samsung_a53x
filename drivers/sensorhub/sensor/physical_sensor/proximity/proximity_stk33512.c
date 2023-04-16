@@ -30,10 +30,12 @@
 #define STK33512_NAME   "STK33512"
 #define STK33512_VENDOR "Sitronix"
 
-void init_proximity_stk33512_variable(struct proximity_data *data)
+int init_proximity_stk33512(void)
 {
+	struct proximity_data *data = get_sensor(SENSOR_TYPE_PROXIMITY)->data;
+
 	data->cal_data_len = sizeof(u16);
-	data->setting_mode = 1;
+	return 0;
 }
 
 void parse_dt_proximity_stk33512(struct device *dev)
@@ -51,7 +53,6 @@ int proximity_open_calibration_stk33512(void)
 {
 	struct proximity_data *data = get_sensor(SENSOR_TYPE_PROXIMITY)->data;
 
-	open_default_proximity_setting_mode();
 	open_default_proximity_calibration();
 	shub_infof(" mode:%d base:%d", data->setting_mode, *((u16 *)data->cal_data));
 
@@ -60,19 +61,27 @@ int proximity_open_calibration_stk33512(void)
 
 void set_proximity_state_stk33512(struct proximity_data *data)
 {
-	set_proximity_setting_mode();
 	if (!is_lcd_changed())
 		set_proximity_calibration();
 }
 
-struct proximity_chipset_funcs prox_stk33512_ops = {
-	.init_proximity_variable = init_proximity_stk33512_variable,
-	.parse_dt = parse_dt_proximity_stk33512,
+struct proximity_chipset_funcs prox_stk33512_funcs = {
 	.open_calibration_file = proximity_open_calibration_stk33512,
 	.sync_proximity_state = set_proximity_state_stk33512,
 };
 
-struct proximity_chipset_funcs *get_proximity_stk33512_function_pointer(char *name)
+void *get_proximity_stk33512_chipset_funcs(void)
+{
+	return &prox_stk33512_funcs;
+}
+
+struct sensor_chipset_init_funcs prox_stk33512_ops = {
+	.init = init_proximity_stk33512,
+	.parse_dt = parse_dt_proximity_stk33512,
+	.get_chipset_funcs = get_proximity_stk33512_chipset_funcs,
+};
+
+struct sensor_chipset_init_funcs *get_proximity_stk33512_function_pointer(char *name)
 {
 	if (strcmp(name, STK33512_NAME) != 0)
 		return NULL;

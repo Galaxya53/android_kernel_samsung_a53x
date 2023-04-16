@@ -24,8 +24,10 @@
 #define TRACK_ADDRS_COUNT 16
 #define PRINT_LINE_MAX	512
 
+#define STORM_THREASH (100*NSEC_PER_USEC)
 #define LOCKUP_THREAH (5*NSEC_PER_SEC)
 #define BUSY_TRHEASH (20*NSEC_PER_SEC)
+#define LATEST_IRQ_THREASH NSEC_PER_SEC
 
 #define BUSY_IRQ_SET_HASH_BITS 4
 
@@ -47,8 +49,13 @@ do {										\
 
 #define print_sched_report(buf) (enable_auto_comment ? pr_auto(ASL3, "%s\n", buf) : pr_info("%s\n", buf))
 
+#define is_valid_task(data) (data->pid == data->tsk->pid \
+		&& !strcmp(data->task_comm, data->tsk->comm) \
+		&& data->tsk->stack != 0)
+
 enum sched_issue_type {
 	SCHED_ISSUE_NONE,
+	SCHED_ISSUE_IDLE,
 	SCHED_ISSUE_HOTPLUGOUT,
 	SCHED_ISSUE_ERROR,
 	SCHED_ISSUE_LOCKUP,
@@ -109,6 +116,7 @@ struct busy_data {
 	struct list_head node;
 	unsigned long long residency;
 	struct task_struct *tsk;
+	char task_comm[TASK_COMM_LEN];
 	pid_t pid;
 };
 
@@ -159,7 +167,7 @@ static void __enable_auto_comment(void *buf)
 	}
 }
 
-static void secdbg_get_busiest_irq(struct lockup_info *info, int cpu)
+static int secdbg_get_busiest_irq(struct lockup_info *info, int cpu, unsigned long long curr_time)
 {
 	long start, len, max;
 	struct irq_log *irq;
@@ -167,6 +175,7 @@ static void secdbg_get_busiest_irq(struct lockup_info *info, int cpu)
 	struct busy_irq *busiest_irq = NULL;
 	int i, alloc;
 	struct hlist_node *tmp;
+	unsigned long long avg_period;
 
 	hash_init(busy_irq_hash);
 
@@ -195,7 +204,7 @@ static void secdbg_get_busiest_irq(struct lockup_info *info, int cpu)
 			b_irq = kzalloc(sizeof(*b_irq), GFP_ATOMIC);
 
 			if (!b_irq)
-				break;
+				return -ENOMEM;
 
 			b_irq->irq = irq->irq;
 			b_irq->fn = irq->fn;
@@ -213,15 +222,23 @@ static void secdbg_get_busiest_irq(struct lockup_info *info, int cpu)
 			busiest_irq = b_irq;
 	}
 
+	avg_period = (busiest_irq->occurrences == 0) ?
+		0 : busiest_irq->total_duration / busiest_irq->occurrences;
+
+	if (avg_period > STORM_THREASH ||
+		curr_time - busiest_irq->last_time > LATEST_IRQ_THREASH)
+		return 0;
+
 	info->irq_info.irq = busiest_irq->irq;
 	info->irq_info.fn = busiest_irq->fn;
-	info->irq_info.avg_period = (busiest_irq->occurrences == 0) ?
-		0 : busiest_irq->total_duration / busiest_irq->occurrences;
+	info->irq_info.avg_period = avg_period;
 
 	hash_for_each_safe(busy_irq_hash, i, tmp, b_irq, hlist) {
 		hash_del(&b_irq->hlist);
 		kfree(b_irq);
 	}
+
+	return 1;
 }
 
 static enum sched_issue_type secdbg_sched_report_check_lockup(unsigned int cpu, struct sched_report *sr)
@@ -273,9 +290,6 @@ static enum sched_issue_type secdbg_sched_report_check_lockup(unsigned int cpu, 
 	if (!last_task)
 		return SCHED_ISSUE_ERROR;
 
-	if (last_task->pid == 0)
-		return SCHED_ISSUE_NONE;
-
 	task_delay_time = (curr_time > last_task->time) ? curr_time - last_task->time : 0;
 
 	if (last_task->time < curr_time &&
@@ -283,10 +297,12 @@ static enum sched_issue_type secdbg_sched_report_check_lockup(unsigned int cpu, 
 		li->time = last_task->time;
 		li->delay_time = task_delay_time;
 
-		if (irq_delay_time > thresh) {
+		if (irq_delay_time > thresh || secdbg_get_busiest_irq(li, cpu, curr_time) <= 0) {
 
-			if (cpu_rq(cpu)->stop == last_task->task)
+			if (irq_delay_time > thresh && cpu_rq(cpu)->stop == last_task->task)
 				return SCHED_ISSUE_HOTPLUGOUT;
+			else if (irq_delay_time <= thresh && last_task->pid == 0)
+				return SCHED_ISSUE_IDLE;
 
 			strncpy(li->task_info.task_comm,
 				last_task->task_comm,
@@ -298,7 +314,6 @@ static enum sched_issue_type secdbg_sched_report_check_lockup(unsigned int cpu, 
 			li->task_info.group_leader[TASK_COMM_LEN - 1] = '\0';
 			li->lockup_type = HL_TASK_STUCK;
 		} else {
-			secdbg_get_busiest_irq(li, cpu);
 			li->lockup_type = HL_IRQ_STORM;
 		}
 		return SCHED_ISSUE_LOCKUP;
@@ -307,7 +322,7 @@ static enum sched_issue_type secdbg_sched_report_check_lockup(unsigned int cpu, 
 }
 
 
-static struct list_head *__create_busy_info(struct task_struct *tsk, unsigned long long residency)
+static struct list_head *__create_busy_info(struct task_log *task, unsigned long long residency)
 {
 	struct busy_data *data;
 
@@ -315,14 +330,19 @@ static struct list_head *__create_busy_info(struct task_struct *tsk, unsigned lo
 	if (!data)
 		return NULL;
 
-	data->pid = tsk->pid;
-	data->tsk = tsk;
+	data->pid = task->pid;
+	data->tsk = task->task;
+	strncpy(data->task_comm, task->task->comm, TASK_COMM_LEN - 1);
 	data->residency = residency;
 
 	return &data->node;
 }
 
+#ifdef SEC_DEBUG_LISTSORT_CONST
+static int __residency_cmp(void *priv, const struct list_head *a, const struct list_head *b)
+#else
 static int __residency_cmp(void *priv, struct list_head *a, struct list_head *b)
+#endif
 {
 	struct busy_data *busy_data_a;
 	struct busy_data *busy_data_b;
@@ -338,7 +358,7 @@ static int __residency_cmp(void *priv, struct list_head *a, struct list_head *b)
 		return 0;
 }
 
-static bool __add_task_in_busy_info(struct task_struct *tsk, unsigned long long residency, struct busy_info *bi)
+static bool __add_task_in_busy_info(struct task_log *task, unsigned long long residency, struct busy_info *bi)
 {
 	struct list_head *entry;
 	struct busy_data *data;
@@ -346,13 +366,13 @@ static bool __add_task_in_busy_info(struct task_struct *tsk, unsigned long long 
 	bi->duration += residency;
 
 	list_for_each_entry(data, &bi->busy_info_list, node) {
-		if (data->pid == tsk->pid) {
+		if (data->pid == task->pid && !strcmp(data->task_comm, task->task_comm)) {
 			data->residency += residency;
 			return true;
 		}
 	}
 
-	entry = __create_busy_info(tsk, residency);
+	entry = __create_busy_info(task, residency);
 
 	if (!entry)
 		return false;
@@ -376,7 +396,7 @@ static enum sched_issue_type secdbg_sched_report_check_busy(unsigned int cpu, st
 	task = dss_get_task_log_by_idx(cpu, start);
 
 	if (task && task->time != 0 && task->pid != 0 &&
-			__add_task_in_busy_info(task->task, local_clock() - task->time, bi)) {
+		__add_task_in_busy_info(task, local_clock() - task->time, bi)) {
 
 		ret = SCHED_ISSUE_BUSY;
 
@@ -385,7 +405,7 @@ static enum sched_issue_type secdbg_sched_report_check_busy(unsigned int cpu, st
 
 		for_each_item_in_dss_by_cpu(task, cpu, start, len, false) {
 			if (task->time != 0 && task->time <= next_task->time &&
-				task->pid != 0 && __add_task_in_busy_info(task->task, next_task->time - task->time, bi)) {
+				task->pid != 0 && __add_task_in_busy_info(task, next_task->time - task->time, bi)) {
 				next_task = task;
 			} else {
 				ret = next_task->time < limit_time ? SCHED_ISSUE_BUSY : SCHED_ISSUE_NONE;
@@ -483,12 +503,18 @@ static void __show_busy_info(unsigned int cpu, struct sched_report *sr)
 		cpu, (unsigned int)(bi->duration / NSEC_PER_MSEC));
 
 	list_for_each_entry(data, &bi->busy_info_list, node) {
-		offset += scnprintf(buf + offset, PRINT_LINE_MAX - offset,
-			" %s:%d[%u%%,%d,%s,%llu]", data->tsk->comm, data->tsk->pid,
-			bi->duration > 0 ? (unsigned int)((data->residency * 100) / bi->duration) : 0,
-			data->tsk->prio,
-			data->tsk->se.cfs_rq->tg->css.cgroup->kn->name,
-			data->tsk->prio < MAX_RT_PRIO ? 0 : data->tsk->se.vruntime);
+		if (is_valid_task(data)) {
+			offset += scnprintf(buf + offset, PRINT_LINE_MAX - offset,
+				" %s:%d[%u%%,%d,%s,%llu]", data->task_comm, data->pid,
+				bi->duration > 0 ? (unsigned int)((data->residency * 100) / bi->duration) : 0,
+				data->tsk->prio,
+				data->tsk->se.cfs_rq->tg->css.cgroup->kn->name,
+				data->tsk->prio < MAX_RT_PRIO ? 0 : data->tsk->se.vruntime);
+		} else {
+			offset += scnprintf(buf + offset, PRINT_LINE_MAX - offset,
+				" %s:%d[%u%%]", data->task_comm, data->pid,
+				bi->duration > 0 ? (unsigned int)((data->residency * 100) / bi->duration) : 0);
+		}
 
 		if (--count == 0)
 			break;
@@ -504,7 +530,6 @@ static void __show_rq_stat(unsigned int cpu)
 
 	offset += scnprintf(buf + offset, PRINT_LINE_MAX - offset, "CPU%u nr_running:%u, CFS load_avg:%lu",
 		cpu, cpu_rq(cpu)->nr_running, cpu_rq(cpu)->cfs.avg.load_avg);
-
 
 	print_sched_report(buf);
 }

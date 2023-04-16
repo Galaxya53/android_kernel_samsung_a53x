@@ -201,6 +201,36 @@ static int dsim_phy_power_off(struct dsim_device *dsim)
 	return 0;
 }
 
+static void _dsim_init(struct dsim_device *dsim, bool ulps)
+{
+	struct exynos_drm_crtc *exynos_crtc = dsim_get_exynos_crtc(dsim);
+
+#if defined(CONFIG_CPU_IDLE)
+	exynos_update_ip_idle_status(dsim->idle_ip_index, 0);
+#endif
+	dsim_phy_power_on(dsim);
+
+	dsim_reg_init(dsim->id, &dsim->config, &dsim->clk_param, !ulps);
+	DPU_EVENT_LOG("DSIM_INIT", exynos_crtc, 0, NULL);
+}
+
+static void _dsim_start(struct dsim_device *dsim, bool ulps)
+{
+	struct exynos_drm_crtc *exynos_crtc = dsim_get_exynos_crtc(dsim);
+
+	bool irq_enabled = dsim->state == DSIM_STATE_INIT;
+
+	if (!ulps)
+		dsim_reg_start(dsim->id);
+	else
+		dsim_reg_exit_ulps_and_start(dsim->id, 0, 0x1F);
+
+	dsim->state = DSIM_STATE_HSCLKEN;
+	if (!irq_enabled)
+		enable_irq(dsim->irq);
+	DPU_EVENT_LOG("DSIM_START", exynos_crtc, 0, NULL);
+}
+
 void dsim_exit_ulps(struct dsim_device *dsim)
 {
 	dsim_debug(dsim, "+\n");
@@ -210,17 +240,10 @@ void dsim_exit_ulps(struct dsim_device *dsim)
 		goto out;
 
 	pm_runtime_get_sync(dsim->dev);
-#if defined(CONFIG_CPU_IDLE)
-	exynos_update_ip_idle_status(dsim->idle_ip_index, 0);
-#endif
 
-	dsim_phy_power_on(dsim);
+	_dsim_init(dsim, true);
+	_dsim_start(dsim, true);
 
-	dsim_reg_init(dsim->id, &dsim->config, &dsim->clk_param, false);
-	dsim_reg_exit_ulps_and_start(dsim->id, 0, 0x1F);
-
-	dsim->state = DSIM_STATE_HSCLKEN;
-	enable_irq(dsim->irq);
 out:
 	mutex_unlock(&dsim->cmd_lock);
 
@@ -231,7 +254,6 @@ static void dsim_enable_locked(struct drm_encoder *encoder)
 {
 	struct dsim_device *dsim = encoder_to_dsim(encoder);
 	struct exynos_drm_crtc *exynos_crtc = dsim_get_exynos_crtc(dsim);
-	bool irq_enabled = dsim->state == DSIM_STATE_INIT;
 
 	if (!mutex_is_locked(&dsim->cmd_lock)) {
 		dsim_err(dsim, "is called w/o lock from %ps\n",
@@ -250,24 +272,13 @@ static void dsim_enable_locked(struct drm_encoder *encoder)
 			dsim->dev->power.wakeup->active_count,
 			dsim->dev->power.wakeup->relax_count);
 
-#if defined(CONFIG_CPU_IDLE)
-	exynos_update_ip_idle_status(dsim->idle_ip_index, 0);
-#endif
-
-	dsim_phy_power_on(dsim);
-
-	dsim_reg_init(dsim->id, &dsim->config, &dsim->clk_param, true);
-	dsim_reg_start(dsim->id);
-
-	dsim->state = DSIM_STATE_HSCLKEN;
-	if (!irq_enabled)
-		enable_irq(dsim->irq);
-
+	_dsim_init(dsim, false);
+	if (!dsim->lp11_reset)
+		_dsim_start(dsim, false);
 #if defined(DSIM_BIST)
 	dsim_reg_set_bist(dsim->id, true, DSIM_GRAY_GRADATION);
 	dsim_dump(dsim);
 #endif
-
 	DPU_EVENT_LOG("DSIM_ENABLED", exynos_crtc, 0, NULL);
 
 	dsim_info(dsim, "-\n");
@@ -299,6 +310,20 @@ static void dsim_atomic_enable(struct drm_encoder *encoder,
 
 	dsim_info(dsim, "-\n");
 }
+
+void dsim_atomic_activate(struct drm_encoder *encoder)
+{
+	struct dsim_device *dsim = encoder_to_dsim(encoder);
+
+	dsim_info(dsim, "+\n");
+
+	mutex_lock(&dsim->cmd_lock);
+	_dsim_start(dsim, false);
+	mutex_unlock(&dsim->cmd_lock);
+
+	dsim_info(dsim, "-\n");
+};
+EXPORT_SYMBOL(dsim_atomic_activate);
 
 void dsim_enter_ulps(struct dsim_device *dsim)
 {
@@ -464,27 +489,18 @@ static int dsim_set_clock_mode(struct dsim_device *dsim,
 
 	dsim->config.cmd_underrun_cnt = p->cmd_underrun_cnt;
 
-#if IS_ENABLED(CONFIG_EXYNOS_FREQ_HOP) && IS_ENABLED(CONFIG_DRM_MCD_COMMON)
-	/* Freq hop save default m,k value */
+#if IS_ENABLED(CONFIG_DRM_MCD_COMMON)
+/* Freq hop save default m,k value */
 	dsim->config.dphy_pms.freq_hop_m = p->m;
 	dsim->config.dphy_pms.freq_hop_k = p->k;
 #endif
 	return 0;
 }
 
-#if IS_ENABLED(CONFIG_EXYNOS_FREQ_HOP) && IS_ENABLED(CONFIG_DRM_MCD_COMMON)
-static int dsim_of_parse_modes(struct device_node *dsim_np, struct device_node *entry,
-		struct dsim_pll_param *pll_param)
-#else
 static int dsim_of_parse_modes(struct device_node *entry,
 		struct dsim_pll_param *pll_param)
-#endif
 {
-#if IS_ENABLED(CONFIG_EXYNOS_FREQ_HOP) && IS_ENABLED(CONFIG_DRM_MCD_COMMON)
-		struct stdphy_pms pms;
-#else
 	u32 res[14];
-#endif
 	int ret, cnt;
 
 	memset(pll_param, 0, sizeof(*pll_param));
@@ -500,37 +516,6 @@ static int dsim_of_parse_modes(struct device_node *entry,
 				pll_param->name, cnt);
 		return -EINVAL;
 	}
-#if IS_ENABLED(CONFIG_EXYNOS_FREQ_HOP) && IS_ENABLED(CONFIG_DRM_MCD_COMMON)
-	of_property_read_u32(entry, "hs-clk", &pll_param->pll_freq);
-	of_property_read_u32(entry, "esc-clk", &pll_param->esc_freq);
-	of_property_read_u32(entry, "cmd_underrun_cnt", &pll_param->cmd_underrun_cnt);
-
-	ret = mcd_dsim_of_get_pll_param(dsim_np, pll_param->pll_freq * 1000, &pms);
-	if (ret) {
-		pr_err("ERR:%s Can't found pll param, hs_clock: %dkhz\n",
-			__func__, pll_param->pll_freq * 1000);
-		WARN_ON(1);
-	}
-
-	pll_param->p = pms.p;
-	pll_param->m = pms.m;
-	pll_param->s = pms.s;
-	pll_param->k = pms.k;
-
-	pll_param->mfr = pms.mfr;
-	pll_param->mrr = pms.mrr;
-	pll_param->sel_pf = pms.sel_pf;
-	pll_param->icp = pms.icp;
-	pll_param->afc_enb = pms.afc_enb;
-	pll_param->extafc = pms.extafc;
-	pll_param->feed_en = pms.feed_en;
-	pll_param->fsel = pms.feed_en;
-	pll_param->fout_mask = pms.fout_mask;
-	pll_param->rsel = pms.rsel;
-
-	pll_param->dither_en = false;
-
-#else
 
 	/* TODO: how dsi dither handle ? */
 	of_property_read_u32_array(entry, "pmsk", res, cnt);
@@ -558,7 +543,6 @@ static int dsim_of_parse_modes(struct device_node *entry,
 	of_property_read_u32(entry, "esc-clk", &pll_param->esc_freq);
 	of_property_read_u32(entry, "cmd_underrun_cnt",
 			&pll_param->cmd_underrun_cnt);
-#endif
 	pr_info("hs: %d, pmsk: %d, %d, %d, %d\n", pll_param->pll_freq,
 			pll_param->p, pll_param->m, pll_param->s, pll_param->k);
 
@@ -613,17 +597,11 @@ static struct dsim_pll_params *dsim_of_get_clock_mode(struct dsim_device *dsim)
 		if (!pll_param)
 			goto getpll_fail;
 
-#if IS_ENABLED(CONFIG_EXYNOS_FREQ_HOP) && IS_ENABLED(CONFIG_DRM_MCD_COMMON)
-		if (dsim_of_parse_modes(dev->of_node, entry, pll_param) < 0) {
-			kfree(pll_param);
-			continue;
-		}
-#else
 		if (dsim_of_parse_modes(entry, pll_param) < 0) {
 			kfree(pll_param);
 			continue;
 		}
-#endif
+
 		pll_params->params[pll_params->num_modes] = pll_param;
 		pll_params->num_modes++;
 	}
@@ -1242,9 +1220,15 @@ static int dsim_wait_fifo_empty(struct dsim_device *dsim, u32 frames)
 	return cnt;
 }
 
-static void dsim_cmd_fail_detector(struct timer_list *arg)
+static void dsim_cmd_timeout_handler(struct timer_list *arg)
 {
 	struct dsim_device *dsim = from_timer(dsim, arg, cmd_timer);
+	queue_work(system_unbound_wq, &dsim->cmd_work);
+}
+
+static void dsim_cmd_fail_detector(struct work_struct *work)
+{
+	struct dsim_device *dsim = container_of(work, struct dsim_device, cmd_work);
 
 	dsim_debug(dsim, "+\n");
 
@@ -2121,7 +2105,8 @@ static int dsim_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, &dsim->encoder);
 
-	timer_setup(&dsim->cmd_timer, dsim_cmd_fail_detector, 0);
+	timer_setup(&dsim->cmd_timer, dsim_cmd_timeout_handler, 0);
+	INIT_WORK(&dsim->cmd_work, dsim_cmd_fail_detector);
 
 #if defined(CONFIG_CPU_IDLE)
 	dsim->idle_ip_index = exynos_get_idle_ip_index(dev_name(&pdev->dev), 1);

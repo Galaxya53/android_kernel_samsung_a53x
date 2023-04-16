@@ -16,6 +16,7 @@
 #include "../panel.h"
 #include "../panel_drv.h"
 #include "s6e3fc3.h"
+#include "s6e3fc3_a53x.h"
 #include "s6e3fc3_dimming.h"
 #ifdef CONFIG_EXYNOS_DECON_MDNIE_LITE
 #include "s6e3fc3_a53x_panel_mdnie.h"
@@ -29,9 +30,6 @@
 #include "../aod/aod_drv.h"
 #endif
 
-#ifdef CONFIG_DYNAMIC_FREQ
-#include "s6e3fc3_a53x_df_tbl.h"
-#endif
 #include "s6e3fc3_a53x_resol.h"
 
 #undef __pn_name__
@@ -1076,9 +1074,6 @@ struct common_panel_info s6e3fc3_a53x_panel_info = {
 		[PANEL_BL_SUBDEV_TYPE_AOD] = &s6e3fc3_a53x_panel_aod_dimming_info,
 #endif
 	},
-#ifdef CONFIG_DYNAMIC_FREQ
-	.df_freq_tbl = a53x_s6e3fc3_dynamic_freq_set,
-#endif
 #ifdef CONFIG_EXTEND_LIVE_CLOCK
 	.aod_tune = &s6e3fc3_a53x_aod,
 #endif

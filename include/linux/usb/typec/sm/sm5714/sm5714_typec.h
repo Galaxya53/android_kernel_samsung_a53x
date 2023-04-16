@@ -124,7 +124,7 @@
 #define SM5714_SBU_OFF_THRESHOLD			0x10
 #define SM5714_SBU_ON_THRESHOLD				0x80
 #else
-#define SM5714_SBU_OFF_THRESHOLD			0x0A
+#define SM5714_SBU_OFF_THRESHOLD			0x24
 #define SM5714_SBU_ON_THRESHOLD				0x3E
 #endif
 
@@ -346,6 +346,7 @@ struct sm5714_phydrv_data {
 #if IS_ENABLED(CONFIG_VBUS_NOTIFIER)
 	struct delayed_work vbus_noti_work;
 #endif
+	int vbus_noti_status;
 	struct delayed_work rx_buf_work;
 	struct delayed_work vbus_dischg_work;
 	struct delayed_work debug_work;
